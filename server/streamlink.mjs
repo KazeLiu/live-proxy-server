@@ -60,7 +60,12 @@ const streamLive = ({ platform, id, res, req, streamlinkCmd, httpProxy }) => {
   stream.stderr.on('data', (data) => {
     const text = data.toString();
     errorText += text;
-    console.error(`[streamlink stderr]: ${text}`);
+
+    if (/InsecureRequestWarning/i.test(text)) {
+      console.warn(`[streamlink warning]: ${text}`);
+    } else {
+      console.error(`[streamlink stderr]: ${text}`);
+    }
 
     if (!hasOutput && /No playable streams|live event has ended|not live|offline/i.test(text)) {
       if (!res.headersSent) {

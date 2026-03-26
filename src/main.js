@@ -4,13 +4,15 @@ import './style.css'
 import App from './App.vue'
 import SettingsPage from './pages/SettingsPage.vue'
 import M3uPage from './pages/M3uPage.vue'
+import LogsPage from './pages/LogsPage.vue'
 
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: '/', redirect: '/m3u' },
     { path: '/settings', component: SettingsPage },
-    { path: '/m3u', component: M3uPage }
+    { path: '/m3u', component: M3uPage },
+    { path: '/logs', component: LogsPage }
   ]
 });
 

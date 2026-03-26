@@ -7,6 +7,55 @@ import { ProxyAgent } from 'undici';
 import { resolveLiveInfo } from './liveInfo.mjs';
 import { streamLive } from './streamlink.mjs';
 
+const LOG_BUFFER_LIMIT = 500;
+const logBuffer = [];
+const logSubscribers = new Set();
+
+const serializeLogArg = (value) => {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch (error) {
+    return String(value);
+  }
+};
+
+const pushLogEntry = (level, message) => {
+  const entry = {
+    level,
+    message,
+    timestamp: new Date().toISOString()
+  };
+  logBuffer.push(entry);
+  if (logBuffer.length > LOG_BUFFER_LIMIT) {
+    logBuffer.splice(0, logBuffer.length - LOG_BUFFER_LIMIT);
+  }
+  const payload = `data: ${JSON.stringify(entry)}\n\n`;
+  for (const res of logSubscribers) {
+    try {
+      res.write(payload);
+    } catch (error) {
+      logSubscribers.delete(res);
+    }
+  }
+};
+
+const patchConsole = () => {
+  const levels = ['log', 'info', 'warn', 'error'];
+  for (const level of levels) {
+    const original = console[level].bind(console);
+    console[level] = (...args) => {
+      try {
+        const message = args.map(serializeLogArg).join(' ');
+        pushLogEntry(level, message);
+      } catch (error) {
+        pushLogEntry('error', `Failed to serialize log: ${error?.message || error}`);
+      }
+      original(...args);
+    };
+  }
+};
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -91,6 +140,25 @@ app.use((req, res, next) => {
     return;
   }
   next();
+});
+
+patchConsole();
+
+app.get('/logs', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  res.write('retry: 1000\n\n');
+  for (const entry of logBuffer) {
+    res.write(`data: ${JSON.stringify(entry)}\n\n`);
+  }
+
+  logSubscribers.add(res);
+  req.on('close', () => {
+    logSubscribers.delete(res);
+  });
 });
 
 app.get('/subscription.m3u', async (_req, res) => {

@@ -149,6 +149,25 @@ const pollBackend = async (origin, timeoutMs = 10000, intervalMs = 500) => {
   }
 };
 
+const replaceSubscriptionPort = async (origin) => {
+  try {
+    const resp = await fetch(`${origin}/subscription.m3u`, { cache: 'no-store' });
+    if (!resp.ok) return;
+    const text = await resp.text();
+    const updated = text
+      .replace(/http:\/\/127\.0\.0\.1:\d+/g, origin)
+      .replace(/http:\/\/localhost:\d+/g, origin);
+    if (updated === text) return;
+    await fetch(`${origin}/subscription`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: updated })
+    });
+  } catch (error) {
+    console.error('同步订阅端口失败', error);
+  }
+};
+
 const saveConfig = async () => {
   isSaving.value = true;
   try {
@@ -178,6 +197,7 @@ const saveConfig = async () => {
     const nextOrigin = `http://127.0.0.1:${form.port}`;
     const ok = await pollBackend(nextOrigin, 12000, 600);
     if (ok) {
+      await replaceSubscriptionPort(nextOrigin);
       await loadConfig();
     } else {
       statusText.value = '重启超时，请确认后端已重新启动';

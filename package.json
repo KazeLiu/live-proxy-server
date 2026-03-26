@@ -7,7 +7,7 @@
     "start": "node server/index.mjs",
     "dev": "node server/index.mjs",
     "dev:ui": "vite",
-    "dev:all": "start /B node server/index.mjs && vite",
+    "dev:all": "concurrently -k \"node server/index.mjs\" \"vite\"",
     "build": "vite build",
     "preview": "vite preview",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -24,6 +24,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.5",
+    "concurrently": "^9.2.1",
     "vite": "^8.0.1"
   }
 }
