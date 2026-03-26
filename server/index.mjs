@@ -3,11 +3,16 @@ import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { ProxyAgent } from 'undici';
+import { resolveLiveInfo } from './liveInfo.mjs';
+import { streamLive } from './streamlink.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
+const OUTPUT_DIR = path.join(__dirname, 'output');
+const SUBSCRIPTION_FILE = path.join(OUTPUT_DIR, 'live.m3u');
 
 const DEFAULT_CONFIG = {
   port: 8899,
@@ -46,6 +51,29 @@ const saveConfig = async (payload) => {
   return nextConfig;
 };
 
+const ensureOutputDir = async () => {
+  await fs.mkdir(OUTPUT_DIR, { recursive: true });
+};
+
+const readSubscription = async () => {
+  try {
+    return await fs.readFile(SUBSCRIPTION_FILE, 'utf-8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') {
+      return '#EXTM3U';
+    }
+    throw error;
+  }
+};
+
+const writeSubscription = async (content) => {
+  await ensureOutputDir();
+  const trimmed = String(content || '').trim();
+  const payload = trimmed ? trimmed : '#EXTM3U';
+  await fs.writeFile(SUBSCRIPTION_FILE, `${payload}\n`, 'utf-8');
+  return payload;
+};
+
 const config = await loadConfig();
 
 const app = express();
@@ -63,6 +91,29 @@ app.use((req, res, next) => {
     return;
   }
   next();
+});
+
+app.get('/subscription.m3u', async (_req, res) => {
+  try {
+    const content = await readSubscription();
+    res.setHeader('Content-Type', 'audio/x-mpegurl');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(content);
+  } catch (error) {
+    console.error('Failed to load subscription:', error);
+    res.status(500).json({ error: 'failed to load subscription' });
+  }
+});
+
+app.post('/subscription', async (req, res) => {
+  try {
+    const content = String(req.body?.content || '');
+    const payload = await writeSubscription(content);
+    res.json({ ok: true, length: payload.length });
+  } catch (error) {
+    console.error('Failed to save subscription:', error);
+    res.status(500).json({ error: 'failed to save subscription' });
+  }
 });
 
 app.get('/config', async (_req, res) => {
@@ -100,79 +151,86 @@ app.post('/restart', (_req, res) => {
   setTimeout(() => process.exit(0), 200);
 });
 
-const platformUrlMap = {
-  youtube: (id) => `https://www.youtube.com/watch?v=${id}`,
-  bilibili: (id) => `https://live.bilibili.com/${id}`
-};
+app.get('/live-info', async (req, res) => {
+  try {
+    const inputUrl = String(req.query.url || '').trim();
+    const payload = await resolveLiveInfo(inputUrl, { httpProxy });
+    res.json(payload);
+  } catch (error) {
+    const statusCode = error?.statusCode || 500;
+    const message = statusCode === 400 ? error.message : 'failed to resolve live info';
+    if (statusCode !== 400) {
+      console.error('Failed to resolve live info:', error);
+    }
+    res.status(statusCode).json({ error: message });
+  }
+});
 
-app.get('/live/:platform/:id', (req, res) => {
-  const { platform, id } = req.params;
-  const buildUrl = platformUrlMap[platform];
-
-  if (!buildUrl) {
-    res.status(400).json({ error: 'unsupported platform' });
+app.get('/image', async (req, res) => {
+  const url = String(req.query.url || '').trim();
+  if (!url) {
+    res.status(400).json({ error: 'missing url' });
     return;
   }
 
-  const url = buildUrl(id);
-
-  res.setHeader('Content-Type', 'video/mp2t');
-  res.setHeader('Cache-Control', 'no-store');
-
-  const streamArgs = [
-    '--loglevel', 'warning',
-    '--stream-segment-threads', '3',
-    '--hls-live-edge', '2',
-    '--stream-timeout', '60',
-    '--http-no-ssl-verify',
-    url,
-    'best',
-    '-O'
-  ];
-
-  if (httpProxy) {
-    streamArgs.unshift('--http-proxy', httpProxy);
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch (error) {
+    res.status(400).json({ error: 'invalid url' });
+    return;
   }
 
-  const stream = spawn(STREAMLINK_CMD, streamArgs, {
-    windowsHide: true
-  });
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    res.status(400).json({ error: 'invalid protocol' });
+    return;
+  }
 
-  const cleanup = () => {
-    if (!stream.killed) {
-      stream.kill();
+  const dispatcher = httpProxy ? new ProxyAgent(httpProxy) : undefined;
+
+  try {
+    const resp = await fetch(parsed.toString(), {
+      dispatcher,
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        'Referer': 'https://live.bilibili.com/'
+      }
+    });
+
+    if (!resp.ok) {
+      res.status(resp.status).end();
+      return;
     }
-  };
 
-  res.on('close', cleanup);
-  res.on('finish', cleanup);
-  res.on('error', cleanup);
-  req.on('aborted', cleanup);
+    res.setHeader('Content-Type', resp.headers.get('content-type') || 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
 
-  stream.stdout.pipe(res);
-
-  stream.stderr.on('data', (data) => {
-    console.error(`[streamlink stderr]: ${data}`);
-  });
-
-  stream.on('close', (code, signal) => {
-    if (!res.headersSent) {
-      res.status(500).end('streamlink closed');
+    if (resp.body) {
+      const { Readable } = await import('stream');
+      Readable.fromWeb(resp.body).pipe(res);
     } else {
-      res.end();
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      res.end(buffer);
     }
-    console.log(`streamlink exited with code ${code} and signal ${signal}`);
-  });
+  } catch (error) {
+    console.error('Failed to proxy image:', error);
+    res.status(502).json({ error: 'failed to proxy image' });
+  }
+});
 
-  stream.on('error', (err) => {
-    console.error('Failed to start streamlink:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'failed to start streamlink' });
-    } else {
-      res.end();
-    }
+app.get('/live/:platform/:id', (req, res) => {
+  const { platform, id } = req.params;
+  streamLive({
+    platform,
+    id,
+    res,
+    req,
+    streamlinkCmd: STREAMLINK_CMD,
+    httpProxy
   });
 });
+
+await ensureOutputDir();
 
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);

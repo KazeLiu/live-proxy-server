@@ -5,7 +5,9 @@
   "main": "server/index.mjs",
   "scripts": {
     "start": "node server/index.mjs",
-    "dev": "start /B node server/index.mjs && vite",
+    "dev": "node server/index.mjs",
+    "dev:ui": "vite",
+    "dev:all": "start /B node server/index.mjs && vite",
     "build": "vite build",
     "preview": "vite preview",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -16,7 +18,9 @@
   "type": "module",
   "dependencies": {
     "express": "^5.2.1",
-    "vue": "^3.5.30"
+    "undici": "^6.19.8",
+    "vue": "^3.5.30",
+    "vue-router": "^4.5.0"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.5",
