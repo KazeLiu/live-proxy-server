@@ -1,0 +1,5 @@
+{
+  "port": 8899,
+  "STREAMLINK_CMD": "C:\\Program Files\\Streamlink\\bin\\streamlink.exe",
+  "httpProxy": "http://127.0.0.1:7897"
+}
