@@ -10,7 +10,7 @@
         <input
           class="input"
           v-model.trim="inputUrl"
-          placeholder="输入完整的直播地址"
+          placeholder="输入完整的直播地址或 YouTube UP 主"
           @keyup.enter="resolveInfo"
         />
         <button class="btn" :disabled="isResolving" @click="resolveInfo">
@@ -106,14 +106,24 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { getApiOrigin, getDefaultPort, resolveInitialBackendPort } from '../utils/apiConfig.js';
+import {
+  getApiOrigin,
+  getDefaultHost,
+  getDefaultPort,
+  getSubscriptionOrigin,
+  resolveInitialBackendPort,
+  resolveInitialSubscriptionHost
+} from '../utils/apiConfig.js';
 
 const DEFAULT_PORT = getDefaultPort();
+const DEFAULT_HOST = getDefaultHost();
 const AUTO_REFRESH_INTERVAL = 3 * 60 * 60 * 1000;
 
 const apiPort = ref(DEFAULT_PORT);
+const subscriptionHost = ref(DEFAULT_HOST);
 const apiOrigin = computed(() => getApiOrigin(apiPort.value));
-const subscriptionUrl = computed(() => `${apiOrigin.value}/subscription.m3u`);
+const subscriptionOrigin = computed(() => getSubscriptionOrigin(subscriptionHost.value, apiPort.value));
+const subscriptionUrl = computed(() => `${subscriptionOrigin.value}/subscription.m3u`);
 
 const inputUrl = ref('');
 const isResolving = ref(false);
@@ -124,6 +134,7 @@ const items = ref([]);
 const activeView = ref('info');
 let isHydrating = true;
 let autoRefreshTimer = null;
+let autoRefreshChannelTimer = null;
 
 const platformLabels = {
   youtube: 'YouTube',
@@ -147,6 +158,7 @@ const buildSourceUrlByPlatform = (platform, id) => {
 };
 
 const buildItemFromLiveInfo = (data, fallbackItem = {}) => {
+  // 统一直播信息结构，保证展示字段一致。
   const coverUrl = data.cover || fallbackItem.rawCover || '';
   const isBilibili = data.platform === 'bilibili' && coverUrl;
   const sourceUrl = data.sourceUrl || fallbackItem.sourceUrl || buildSourceUrlByPlatform(data.platform, data.id);
@@ -169,6 +181,7 @@ const buildItemFromLiveInfo = (data, fallbackItem = {}) => {
 };
 
 const fetchLiveInfo = async (url) => {
+  // 统一的直播信息解析入口（视频级别）。
   const resp = await fetch(`${apiOrigin.value}/live-info?url=${encodeURIComponent(url)}`);
   if (!resp.ok) {
     throw new Error('解析失败');
@@ -176,7 +189,49 @@ const fetchLiveInfo = async (url) => {
   return resp.json();
 };
 
+const isYouTubeChannelInput = (value) => {
+  // 判断用户是否输入了 YouTube UP 主/频道信息，用于走频道解析分支。
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+
+  if (raw.startsWith('@')) return true;
+
+  try {
+    const url = new URL(raw);
+    if (!url.hostname.includes('youtube.com')) return false;
+    return ['/@', '/channel/', '/user/', '/c/'].some((prefix) => url.pathname.startsWith(prefix));
+  } catch (error) {
+    return false;
+  }
+};
+
+const addYouTubeChannel = async (channel) => {
+  // 由后端解析频道并落入 m3u，前端只需刷新列表。
+  const resp = await fetch(`${apiOrigin.value}/subscription/youtube-channel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel })
+  });
+  if (!resp.ok) {
+    throw new Error('添加频道失败');
+  }
+  return resp.json();
+};
+
+const refreshYouTubeChannels = async () => {
+  // 通知后端刷新所有频道来源条目，并更新 m3u。
+  const resp = await fetch(`${apiOrigin.value}/subscription/youtube-channel/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' }
+  });
+  if (!resp.ok) {
+    throw new Error('刷新频道失败');
+  }
+  return resp.json();
+};
+
 const resolveInfo = async () => {
+  // 根据输入类型决定走「视频解析」还是「频道订阅」流程。
   if (!inputUrl.value) {
     errorText.value = '请先输入直播地址';
     return;
@@ -185,6 +240,14 @@ const resolveInfo = async () => {
   errorText.value = '';
   preview.value = null;
   try {
+    if (isYouTubeChannelInput(inputUrl.value)) {
+      await addYouTubeChannel(inputUrl.value);
+      await loadSubscription();
+      inputUrl.value = '';
+      errorText.value = '已添加 YouTube UP 主订阅';
+      return;
+    }
+
     const data = await fetchLiveInfo(inputUrl.value);
     preview.value = buildItemFromLiveInfo(data);
   } catch (error) {
@@ -211,6 +274,7 @@ const removeItem = (id) => {
 };
 
 const refreshItem = async (item) => {
+  // 单条刷新沿用视频解析逻辑，保证入口一致。
   if (!item || item.isRefreshing) {
     return;
   }
@@ -233,18 +297,29 @@ const refreshItem = async (item) => {
 };
 
 const refreshAllItems = async () => {
-  // 批量刷新时沿用单条刷新逻辑，确保导入条目与手动添加条目行为一致。
+  // 批量刷新时先更新频道来源条目，再刷新单条直播信息。
   if (!items.value.length || isBatchRefreshing.value) {
     return;
   }
 
   isBatchRefreshing.value = true;
   try {
+    await refreshChannelSubscriptions();
     for (const item of items.value) {
       await refreshItem(item);
     }
   } finally {
     isBatchRefreshing.value = false;
+  }
+};
+
+const refreshChannelSubscriptions = async () => {
+  // 专门刷新 UP 主来源条目，并重建对应的直播列表。
+  try {
+    await refreshYouTubeChannels();
+    await loadSubscription();
+  } catch (error) {
+    console.error('刷新频道订阅失败', error);
   }
 };
 
@@ -268,6 +343,7 @@ const parseAttributes = (text) => {
 };
 
 const parseM3u = (content) => {
+  // 解析 m3u 内容为前端条目，保留频道来源信息。
   const lines = String(content || '')
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -314,6 +390,10 @@ const parseM3u = (content) => {
       platformLabel,
       streamUrl,
       sourceUrl: buildSourceUrlByPlatform(platform, id),
+      sourceType: attrs['x-source'] || '',
+      channelKey: attrs['x-channel-key'] || '',
+      channelName: attrs['x-channel-name'] || '',
+      channelUrl: attrs['x-channel-url'] || '',
       isRefreshing: false,
       lastRefreshedAt: ''
     });
@@ -324,6 +404,7 @@ const parseM3u = (content) => {
 };
 
 const m3uContent = computed(() => {
+  // 生成 m3u 内容并带上频道来源元数据。
   if (!items.value.length) {
     return '#EXTM3U';
   }
@@ -332,7 +413,22 @@ const m3uContent = computed(() => {
     ...items.value.map((item) => {
       const displayName = item.title || item.author || item.platformLabel;
       const author = item.author || '';
-      const meta = `#EXTINF:-1 tvg-logo="${item.cover}" tvg-name="${author}" group-title="Live",${displayName}`;
+      const extraAttrs = [];
+
+      if (item.sourceType) {
+        extraAttrs.push(`x-source="${item.sourceType}"`);
+      }
+      if (item.channelKey) {
+        extraAttrs.push(`x-channel-key="${item.channelKey}"`);
+      }
+      if (item.channelName) {
+        extraAttrs.push(`x-channel-name="${item.channelName}"`);
+      }
+      if (item.channelUrl) {
+        extraAttrs.push(`x-channel-url="${item.channelUrl}"`);
+      }
+
+      const meta = `#EXTINF:-1 tvg-logo="${item.cover}" tvg-name="${author}" group-title="Live" ${extraAttrs.join(' ')},${displayName}`;
       return `${meta}\n${item.streamUrl}`;
     })
   ].join('\n');
@@ -351,6 +447,7 @@ const saveSubscription = async () => {
 };
 
 const loadSubscription = async () => {
+  // 同步后端订阅内容到前端列表。
   try {
     const resp = await fetch(subscriptionUrl.value, { cache: 'no-store' });
     if (!resp.ok) {
@@ -386,10 +483,19 @@ watch(
 );
 
 onMounted(async () => {
-  apiPort.value = await resolveInitialBackendPort();
+  // 初始化订阅列表，并开启定时刷新。
+  const [initialPort, initialHost] = await Promise.all([
+    resolveInitialBackendPort(),
+    resolveInitialSubscriptionHost()
+  ]);
+  apiPort.value = initialPort;
+  subscriptionHost.value = initialHost || DEFAULT_HOST;
   await loadSubscription();
   autoRefreshTimer = window.setInterval(() => {
     refreshAllItems();
+  }, AUTO_REFRESH_INTERVAL);
+  autoRefreshChannelTimer = window.setInterval(() => {
+    refreshChannelSubscriptions();
   }, AUTO_REFRESH_INTERVAL);
 });
 
@@ -397,6 +503,10 @@ onBeforeUnmount(() => {
   if (autoRefreshTimer) {
     window.clearInterval(autoRefreshTimer);
     autoRefreshTimer = null;
+  }
+  if (autoRefreshChannelTimer) {
+    window.clearInterval(autoRefreshChannelTimer);
+    autoRefreshChannelTimer = null;
   }
 });
 </script>

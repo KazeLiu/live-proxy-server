@@ -1,10 +1,12 @@
 import express from 'express';
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { ProxyAgent } from 'undici';
 import { resolveLiveInfo } from './liveInfo.mjs';
+import { resolveYouTubeChannelLives } from './youtubeChannelResolver.mjs';
 import { readCookieContent, writeCookieContent } from './cookies.mjs';
 import { streamLive } from './streamlink.mjs';
 
@@ -65,7 +67,7 @@ const OUTPUT_DIR = path.join(__dirname, 'output');
 const SUBSCRIPTION_FILE = path.join(OUTPUT_DIR, 'live.m3u');
 
 const DEFAULT_CONFIG = {
-  port:8900,
+  port: 8900,
   STREAMLINK_CMD: 'C:\\Program Files\\Streamlink\\bin\\streamlink.exe',
   httpProxy: 'http://127.0.0.1:7897',
   proxyEnabled: true
@@ -129,6 +131,109 @@ const writeSubscription = async (content) => {
 const buildSubscriptionDownloadName = () => {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   return `live-${timestamp}.m3u`;
+};
+
+const parseAttributes = (text) => {
+  const attrs = {};
+  const regex = /([\w-]+)="(.*?)"/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    attrs[match[1]] = match[2];
+  }
+  return attrs;
+};
+
+const parseM3uEntries = (content) => {
+  // 解析 m3u 内容为结构化条目，保留自定义元数据字段。
+  const lines = String(content || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) return [];
+
+  const entries = [];
+  let pendingMeta = '';
+
+  for (const line of lines) {
+    if (line.startsWith('#EXTINF')) {
+      pendingMeta = line;
+      continue;
+    }
+    if (line.startsWith('#')) {
+      continue;
+    }
+    if (!line) continue;
+
+    const metaText = pendingMeta || '';
+    const attrText = metaText.includes(' ') ? metaText.slice(metaText.indexOf(' ') + 1) : '';
+    const displayName = metaText.includes(',') ? metaText.split(',').slice(1).join(',').trim() : '';
+    const attrs = parseAttributes(attrText);
+
+    entries.push({
+      title: displayName || attrs['tvg-name'] || '直播',
+      author: attrs['tvg-name'] || '',
+      cover: attrs['tvg-logo'] || '',
+      streamUrl: line,
+      sourceType: attrs['x-source'] || '',
+      channelKey: attrs['x-channel-key'] || '',
+      channelName: attrs['x-channel-name'] || '',
+      channelUrl: attrs['x-channel-url'] || ''
+    });
+
+    pendingMeta = '';
+  }
+
+  return entries;
+};
+
+const buildExtinfMeta = (entry) => {
+  // 组装单条 EXTINF 元信息，支持自定义来源字段。
+  const title = entry.title || entry.author || '直播';
+  const author = entry.author || '';
+  const cover = entry.cover || '';
+  const extraAttrs = [];
+
+  if (entry.sourceType) {
+    extraAttrs.push(`x-source="${entry.sourceType}"`);
+  }
+  if (entry.channelKey) {
+    extraAttrs.push(`x-channel-key="${entry.channelKey}"`);
+  }
+  if (entry.channelName) {
+    extraAttrs.push(`x-channel-name="${entry.channelName}"`);
+  }
+  if (entry.channelUrl) {
+    extraAttrs.push(`x-channel-url="${entry.channelUrl}"`);
+  }
+
+  const attrText = [
+    `tvg-logo="${cover}"`,
+    `tvg-name="${author}"`,
+    'group-title="Live"',
+    ...extraAttrs
+  ].join(' ');
+
+  return `#EXTINF:-1 ${attrText},${title}`;
+};
+
+const buildM3uContent = (entries) => {
+  // 统一生成 m3u 内容，空列表返回标准头。
+  if (!entries.length) return '#EXTM3U';
+  return ['#EXTM3U', ...entries.map((entry) => `${buildExtinfMeta(entry)}\n${entry.streamUrl}`)].join('\n');
+};
+
+const resolveLocalNetworkIp = () => {
+  // 获取首个可用 IPv4 内网地址，用于订阅地址提示。
+  const interfaces = os.networkInterfaces();
+  for (const items of Object.values(interfaces)) {
+    for (const item of items || []) {
+      if (item?.family !== 'IPv4' || item.internal) {
+        continue;
+      }
+      return item.address;
+    }
+  }
+  return '';
 };
 
 const config = await loadConfig();
@@ -202,6 +307,95 @@ app.post('/subscription', async (req, res) => {
   } catch (error) {
     console.error('Failed to save subscription:', error);
     res.status(500).json({ error: 'failed to save subscription' });
+  }
+});
+
+app.post('/subscription/youtube-channel', async (req, res) => {
+  // 解析并写入指定频道的当前直播条目，覆盖同频道旧数据。
+  try {
+    const input = String(req.body?.channel || '').trim();
+    if (!input) {
+      res.status(400).json({ error: 'missing channel' });
+      return;
+    }
+
+    const result = await resolveYouTubeChannelLives(input, { httpProxy });
+    const currentContent = await readSubscription();
+    const entries = parseM3uEntries(currentContent);
+
+    const nextEntries = entries.filter((entry) => {
+      if (entry.sourceType !== 'youtube-channel') return true;
+      return entry.channelKey !== result.channelKey;
+    });
+
+    for (const live of result.lives) {
+      nextEntries.push({
+        title: live.title || result.channelName || 'YouTube Live',
+        author: live.author || result.channelName || '',
+        cover: live.cover || '',
+        streamUrl: `http://127.0.0.1:${PORT}/live/youtube/${live.videoId}`,
+        sourceType: 'youtube-channel',
+        channelKey: result.channelKey,
+        channelName: result.channelName,
+        channelUrl: result.channelUrl
+      });
+    }
+
+    const payload = await writeSubscription(buildM3uContent(nextEntries));
+    res.json({
+      ok: true,
+      channelKey: result.channelKey,
+      channelName: result.channelName,
+      lives: result.lives.length,
+      length: payload.length
+    });
+  } catch (error) {
+    console.error('Failed to add youtube channel:', error);
+    res.status(500).json({ error: 'failed to add youtube channel' });
+  }
+});
+
+app.post('/subscription/youtube-channel/refresh', async (_req, res) => {
+  // 批量刷新 m3u 内所有频道来源条目，动态增减。
+  try {
+    const currentContent = await readSubscription();
+    const entries = parseM3uEntries(currentContent);
+    const channelKeys = Array.from(
+      new Set(
+        entries
+          .filter((entry) => entry.sourceType === 'youtube-channel' && entry.channelKey)
+          .map((entry) => entry.channelKey)
+      )
+    );
+
+    if (!channelKeys.length) {
+      res.json({ ok: true, refreshed: 0, length: currentContent.length });
+      return;
+    }
+
+    let nextEntries = entries.filter((entry) => entry.sourceType !== 'youtube-channel');
+
+    for (const channelKey of channelKeys) {
+      const result = await resolveYouTubeChannelLives(channelKey, { httpProxy });
+      for (const live of result.lives) {
+        nextEntries.push({
+          title: live.title || result.channelName || 'YouTube Live',
+          author: live.author || result.channelName || '',
+          cover: live.cover || '',
+          streamUrl: `http://127.0.0.1:${PORT}/live/youtube/${live.videoId}`,
+          sourceType: 'youtube-channel',
+          channelKey: result.channelKey,
+          channelName: result.channelName,
+          channelUrl: result.channelUrl
+        });
+      }
+    }
+
+    const payload = await writeSubscription(buildM3uContent(nextEntries));
+    res.json({ ok: true, refreshed: channelKeys.length, length: payload.length });
+  } catch (error) {
+    console.error('Failed to refresh youtube channels:', error);
+    res.status(500).json({ error: 'failed to refresh youtube channels' });
   }
 });
 
@@ -359,6 +553,16 @@ app.post('/cookies/:platform', async (req, res) => {
     }
     res.status(statusCode).json({ error: statusCode === 400 ? error.message : 'failed to save cookies' });
   }
+});
+
+app.get('/local-ip', (_req, res) => {
+  // 返回本机局域网 IP，用于前端展示订阅地址。
+  const ip = resolveLocalNetworkIp();
+  if (!ip) {
+    res.status(404).json({ error: 'no local ip' });
+    return;
+  }
+  res.json({ ip });
 });
 
 app.get('/live/:platform/:id', async (req, res) => {

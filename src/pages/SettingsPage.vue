@@ -56,6 +56,20 @@
         </div>
 
         <div class="form-group">
+          <label class="label">订阅地址</label>
+          <input
+            class="styled-input"
+            type="text"
+            v-model="form.host"
+            placeholder="127.0.0.1 或 192.168.1.x"
+          />
+          <p class="hint">
+            仅用于 m3u 内部地址，Docker/局域网播放器请填写电脑局域网 IP。
+            <span v-if="localIpHint">当前检测：{{ localIpHint }}</span>
+          </p>
+        </div>
+
+        <div class="form-group">
           <label class="label">服务端口</label>
           <input
             class="styled-input"
@@ -117,18 +131,24 @@ import { onMounted, reactive, ref, computed } from 'vue';
 import {
   createInitialConfig,
   getApiOrigin,
+  getDefaultHost,
   getDefaultPort,
+  getSubscriptionOrigin,
   resolveInitialBackendPort,
+  resolveInitialSubscriptionHost,
   setStoredBackendPort,
+  setStoredSubscriptionHost,
   updateCachedAppConfig
 } from '../utils/apiConfig.js';
 
 const DEFAULT_PORT = getDefaultPort();
+const DEFAULT_HOST = getDefaultHost();
 const REQUEST_TIMEOUT_MS = 2500;
 const apiPort = ref(DEFAULT_PORT);
 const apiOrigin = computed(() => getApiOrigin(apiPort.value));
 
 const form = reactive({
+  host: DEFAULT_HOST,
   STREAMLINK_CMD: '',
   httpProxy: '',
   proxyEnabled: true,
@@ -150,6 +170,7 @@ const isImporting = ref(false);
 const importFile = ref(null);
 const importFileName = ref('');
 const importPort = ref(DEFAULT_PORT);
+const localIpHint = ref('');
 
 const setApiPort = (nextPort) => {
   apiPort.value = nextPort;
@@ -184,8 +205,33 @@ const fetchConfig = async (origin, timeoutMs = REQUEST_TIMEOUT_MS) => {
   return { origin, data };
 };
 
+const normalizeHostInput = (value) => {
+  // 仅保留主机/IP 部分，避免用户输入带协议或端口。
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return DEFAULT_HOST;
+  return raw
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/.+$/, '')
+    .split(':')[0]
+    .trim() || DEFAULT_HOST;
+};
+
+const fetchLocalNetworkIp = async () => {
+  // 通过后端接口获取局域网 IP，避免前端直接读取系统网卡信息。
+  try {
+    const resp = await fetchWithTimeout(`${apiOrigin.value}/local-ip`, { cache: 'no-store' }, 1500);
+    if (!resp.ok) return '';
+    const data = await resp.json();
+    return typeof data?.ip === 'string' ? data.ip.trim() : '';
+  } catch (error) {
+    console.warn('获取局域网 IP 失败', error);
+    return '';
+  }
+};
+
 const applyConfig = (data) => {
   const normalized = updateCachedAppConfig(data);
+  form.host = normalizeHostInput(normalized.host || DEFAULT_HOST);
   form.STREAMLINK_CMD = normalized.STREAMLINK_CMD;
   form.httpProxy = normalized.httpProxy;
   form.proxyEnabled = normalized.proxyEnabled;
@@ -193,28 +239,16 @@ const applyConfig = (data) => {
 };
 
 const loadConfig = async () => {
-  const originsToTry = [apiOrigin.value];
-  const fallbackOrigin = `http://127.0.0.1:${DEFAULT_PORT}`;
-  if (apiOrigin.value !== fallbackOrigin) {
-    originsToTry.push(fallbackOrigin);
+  try {
+    const { data } = await fetchConfig(apiOrigin.value);
+    applyConfig(data);
+    statusText.value = '配置加载成功';
+    return true;
+  } catch (error) {
+    console.error('加载配置失败:', error);
+    statusText.value = '连接失败，请确认后端已启动';
+    return false;
   }
-
-  for (const origin of originsToTry) {
-    try {
-      const { data } = await fetchConfig(origin);
-      if (origin !== apiOrigin.value) {
-        setApiPort(DEFAULT_PORT);
-      }
-      applyConfig(data);
-      statusText.value = '配置加载成功';
-      return true;
-    } catch (error) {
-      console.error(`加载配置失败: ${origin}`, error);
-    }
-  }
-
-  statusText.value = '连接失败，请确认后端已启动';
-  return false;
 };
 
 const pollBackend = async (origin, timeoutMs = 10000, intervalMs = 500) => {
@@ -238,14 +272,17 @@ const pollBackend = async (origin, timeoutMs = 10000, intervalMs = 500) => {
   }
 };
 
-const replaceSubscriptionPort = async (origin) => {
+const replaceSubscriptionPort = async (origin, host, port) => {
+  // 同步订阅中的端口与主机（只改 m3u 内容，不影响后端访问地址）。
   try {
     const resp = await fetchWithTimeout(`${origin}/subscription.m3u`, { cache: 'no-store' });
     if (!resp.ok) return;
     const text = await resp.text();
+    const nextOrigin = getSubscriptionOrigin(host, port);
     const updated = text
-      .replace(/http:\/\/127\.0\.0\.1:\d+/g, origin)
-      .replace(/http:\/\/localhost:\d+/g, origin);
+      .replace(/http:\/\/127\.0\.0\.1:\d+/g, nextOrigin)
+      .replace(/http:\/\/localhost:\d+/g, nextOrigin)
+      .replace(/http:\/\/[\d.]+:\d+/g, nextOrigin);
     if (updated === text) return;
     await fetchWithTimeout(`${origin}/subscription`, {
       method: 'POST',
@@ -253,7 +290,7 @@ const replaceSubscriptionPort = async (origin) => {
       body: JSON.stringify({ content: updated })
     }, 4000);
   } catch (error) {
-    console.error('同步订阅端口失败', error);
+    console.error('同步订阅地址失败', error);
   }
 };
 
@@ -266,10 +303,10 @@ const triggerRestart = async (targetOrigin, nextPort, successMessage = '保存�
   statusText.value = successMessage;
   setApiPort(nextPort);
 
-  const nextOrigin = `http://127.0.0.1:${nextPort}`;
+  const nextOrigin = getApiOrigin(nextPort);
   const ok = await pollBackend(nextOrigin, 12000, 600);
   if (ok) {
-    await replaceSubscriptionPort(nextOrigin);
+    await replaceSubscriptionPort(nextOrigin, normalizeHostInput(form.host), nextPort);
     window.location.reload();
     return true;
   }
@@ -297,6 +334,9 @@ const saveConfig = async () => {
       throw new Error('保存失败');
     }
 
+    const normalizedHost = normalizeHostInput(form.host);
+    form.host = normalizedHost;
+    setStoredSubscriptionHost(normalizedHost);
     await triggerRestart(apiOrigin.value, form.port, '保存成功，后端重启中...');
   } catch (error) {
     statusText.value = error?.message || '保存失败';
@@ -384,6 +424,7 @@ onMounted(async () => {
   try {
     const initialConfig = await createInitialConfig();
     Object.assign(form, initialConfig);
+    form.host = normalizeHostInput(initialConfig.host || DEFAULT_HOST);
     importPort.value = initialConfig.port;
     statusText.value = '正在连接后端...';
   } catch (error) {
@@ -392,8 +433,20 @@ onMounted(async () => {
   }
 
   try {
-    setApiPort(await resolveInitialBackendPort());
+    const [initialPort, initialHost] = await Promise.all([
+      resolveInitialBackendPort(),
+      resolveInitialSubscriptionHost()
+    ]);
+    setApiPort(initialPort);
+    form.host = normalizeHostInput(initialHost);
+    updateCachedAppConfig({ host: form.host });
     await loadConfig();
+
+    localIpHint.value = await fetchLocalNetworkIp();
+    if (localIpHint.value && form.host === DEFAULT_HOST) {
+      form.host = localIpHint.value;
+      setStoredSubscriptionHost(localIpHint.value);
+    }
   } catch (error) {
     console.error('初始化配置失败:', error);
     statusText.value = '页面初始化失败';

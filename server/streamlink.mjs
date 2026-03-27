@@ -20,7 +20,7 @@ const streamLive = async ({ platform, id, res, req, streamlinkCmd, httpProxy, ou
   res.setHeader('Cache-Control', 'no-store');
 
   const streamArgs = [
-    '--loglevel', 'warning',
+    '--loglevel', 'error',
     '--stream-segment-threads', '3',
     '--hls-live-edge', '2',
     '--stream-timeout', '60',
