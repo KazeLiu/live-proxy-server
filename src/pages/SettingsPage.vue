@@ -27,13 +27,32 @@
         </div>
 
         <div class="form-group">
+          <div class="toggle-row">
+            <div>
+              <label class="label toggle-label">启用代理</label>
+              <p class="hint toggle-hint">关闭后将不再使用 HTTP 代理，直播请求改为直连</p>
+            </div>
+            <button
+              class="toggle-switch"
+              :class="{ active: form.proxyEnabled }"
+              type="button"
+              @click="form.proxyEnabled = !form.proxyEnabled"
+            >
+              <span class="toggle-thumb"></span>
+            </button>
+          </div>
+        </div>
+
+        <div class="form-group">
           <label class="label">HTTP 代理</label>
           <input
             class="styled-input"
             type="text"
             v-model="form.httpProxy"
             placeholder="http://127.0.0.1:7897"
+            :disabled="!form.proxyEnabled"
           />
+          <p class="hint" v-if="!form.proxyEnabled">当前已关闭代理，此地址不会被使用</p>
         </div>
 
         <div class="form-group">
@@ -78,6 +97,7 @@ const apiOrigin = computed(() => getApiOrigin(apiPort.value));
 const form = reactive({
   STREAMLINK_CMD: '',
   httpProxy: '',
+  proxyEnabled: true,
   port: DEFAULT_PORT
 });
 
@@ -130,6 +150,7 @@ const applyConfig = (data) => {
   const normalized = updateCachedAppConfig(data);
   form.STREAMLINK_CMD = normalized.STREAMLINK_CMD;
   form.httpProxy = normalized.httpProxy;
+  form.proxyEnabled = normalized.proxyEnabled;
   form.port = normalized.port;
 };
 
@@ -209,6 +230,7 @@ const saveConfig = async () => {
       body: JSON.stringify({
         STREAMLINK_CMD: form.STREAMLINK_CMD,
         httpProxy: form.httpProxy,
+        proxyEnabled: form.proxyEnabled,
         port: form.port
       })
     }, 4000);
@@ -376,13 +398,61 @@ onMounted(async () => {
   gap: 10px;
 }
 
-.hint {
-  font-size: 12px;
-  color: #adb5bd;
-  margin: 6px 0 0 4px;
-}
+ .hint {
+   font-size: 12px;
+   color: #adb5bd;
+   margin: 6px 0 0 4px;
+ }
+ 
+ .toggle-row {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+   gap: 16px;
+ }
+ 
+ .toggle-label {
+   margin-bottom: 4px;
+ }
+ 
+ .toggle-hint {
+   margin: 0;
+ }
+ 
+ .toggle-switch {
+   position: relative;
+   width: 54px;
+   height: 32px;
+   border: none;
+   border-radius: 999px;
+   background: #ced4da;
+   cursor: pointer;
+   transition: background 0.2s ease;
+   flex-shrink: 0;
+ }
+ 
+ .toggle-switch.active {
+   background: #228be6;
+ }
+ 
+ .toggle-thumb {
+   position: absolute;
+   top: 4px;
+   left: 4px;
+   width: 24px;
+   height: 24px;
+   border-radius: 50%;
+   background: #fff;
+   transition: transform 0.2s ease;
+   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+ }
+ 
+ .toggle-switch.active .toggle-thumb {
+   transform: translateX(22px);
+ }
+ 
+ .divider {
 
-.divider {
   height: 1px;
   background: #f1f3f5;
   margin: 24px 0;

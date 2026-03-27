@@ -66,7 +66,8 @@ const SUBSCRIPTION_FILE = path.join(OUTPUT_DIR, 'live.m3u');
 const DEFAULT_CONFIG = {
   port:8900,
   STREAMLINK_CMD: 'C:\\Program Files\\Streamlink\\bin\\streamlink.exe',
-  httpProxy: 'http://127.0.0.1:7897'
+  httpProxy: 'http://127.0.0.1:7897',
+  proxyEnabled: true
 };
 
 const normalizeConfig = (input) => {
@@ -76,7 +77,8 @@ const normalizeConfig = (input) => {
   return {
     port: Number.isFinite(port) && port > 0 ? port : DEFAULT_CONFIG.port,
     STREAMLINK_CMD: String(merged.STREAMLINK_CMD || DEFAULT_CONFIG.STREAMLINK_CMD),
-    httpProxy: String(merged.httpProxy || DEFAULT_CONFIG.httpProxy)
+    httpProxy: String(merged.httpProxy || DEFAULT_CONFIG.httpProxy),
+    proxyEnabled: merged.proxyEnabled !== false
   };
 };
 
@@ -128,7 +130,7 @@ const config = await loadConfig();
 const app = express();
 const PORT = config.port;
 const STREAMLINK_CMD = config.STREAMLINK_CMD;
-const httpProxy = config.httpProxy;
+const httpProxy = config.proxyEnabled ? config.httpProxy : '';
 
 app.use(express.json());
 app.use((req, res, next) => {
