@@ -1,11 +1,12 @@
 import { spawn } from 'child_process';
+import { resolveCookieFile } from './cookies.mjs';
 
 const platformUrlMap = {
   youtube: (id) => `https://www.youtube.com/watch?v=${id}`,
   bilibili: (id) => `https://live.bilibili.com/${id}`
 };
 
-const streamLive = ({ platform, id, res, req, streamlinkCmd, httpProxy }) => {
+const streamLive = async ({ platform, id, res, req, streamlinkCmd, httpProxy, outputDir }) => {
   const buildUrl = platformUrlMap[platform];
 
   if (!buildUrl) {
@@ -23,16 +24,23 @@ const streamLive = ({ platform, id, res, req, streamlinkCmd, httpProxy }) => {
     '--stream-segment-threads', '3',
     '--hls-live-edge', '2',
     '--stream-timeout', '60',
-    '--http-no-ssl-verify',
+    '--http-no-ssl-verify'
+  ];
+
+  const cookieFile = await resolveCookieFile(platform, outputDir);
+  if (cookieFile) {
+    streamArgs.push('--http-cookies-file', cookieFile);
+  }
+
+  streamArgs.push(
     url,
     'best',
     '-O'
-  ];
+  );
 
   if (httpProxy) {
     streamArgs.unshift('--http-proxy', httpProxy);
   }
-
   const stream = spawn(streamlinkCmd, streamArgs, {
     windowsHide: true
   });

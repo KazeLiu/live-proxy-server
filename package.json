@@ -42,7 +42,8 @@
       "server/**",
       "dist/**",
       "config.json",
-      "server/config.json"
+      "server/config.json",
+      "node_modules/**"
     ],
     "files": [
       "dist/**/*",

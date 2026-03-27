@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { ProxyAgent } from 'undici';
 import { resolveLiveInfo } from './liveInfo.mjs';
+import { readCookieContent, writeCookieContent } from './cookies.mjs';
 import { streamLive } from './streamlink.mjs';
 
 const LOG_BUFFER_LIMIT = 500;
@@ -288,15 +289,43 @@ app.get('/image', async (req, res) => {
   }
 });
 
-app.get('/live/:platform/:id', (req, res) => {
+app.get('/cookies/:platform', async (req, res) => {
+  try {
+    const content = await readCookieContent(req.params.platform, OUTPUT_DIR);
+    res.json({ platform: req.params.platform, content });
+  } catch (error) {
+    const statusCode = error?.statusCode || 500;
+    if (statusCode !== 400) {
+      console.error('Failed to load cookies:', error);
+    }
+    res.status(statusCode).json({ error: statusCode === 400 ? error.message : 'failed to load cookies' });
+  }
+});
+
+app.post('/cookies/:platform', async (req, res) => {
+  try {
+    const content = String(req.body?.content || '');
+    const result = await writeCookieContent(req.params.platform, content, OUTPUT_DIR);
+    res.json({ ok: true, platform: result.platform, length: result.length });
+  } catch (error) {
+    const statusCode = error?.statusCode || 500;
+    if (statusCode !== 400) {
+      console.error('Failed to save cookies:', error);
+    }
+    res.status(statusCode).json({ error: statusCode === 400 ? error.message : 'failed to save cookies' });
+  }
+});
+
+app.get('/live/:platform/:id', async (req, res) => {
   const { platform, id } = req.params;
-  streamLive({
+  await streamLive({
     platform,
     id,
     res,
     req,
     streamlinkCmd: STREAMLINK_CMD,
-    httpProxy
+    httpProxy,
+    outputDir: OUTPUT_DIR
   });
 });
 

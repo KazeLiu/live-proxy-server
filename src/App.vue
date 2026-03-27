@@ -7,6 +7,7 @@
       </div>
       <nav class="nav-links">
         <RouterLink class="nav-link" to="/m3u">生成 m3u</RouterLink>
+        <RouterLink class="nav-link" to="/cookies">Cookies</RouterLink>
         <RouterLink class="nav-link" to="/logs">日志</RouterLink>
         <RouterLink class="nav-link" to="/settings">系统设置</RouterLink>
       </nav>
