@@ -38,10 +38,11 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
+import { getApiOrigin, getDefaultPort, resolveInitialBackendPort } from '../utils/apiConfig.js';
 
-const DEFAULT_PORT = 8900;
-const apiPort = ref(Number(localStorage.getItem('backend_port')) || DEFAULT_PORT);
-const apiOrigin = computed(() => `http://127.0.0.1:${apiPort.value}`);
+const DEFAULT_PORT = getDefaultPort();
+const apiPort = ref(DEFAULT_PORT);
+const apiOrigin = computed(() => getApiOrigin(apiPort.value));
 
 const logs = ref([]);
 const statusText = ref('正在连接...');
@@ -111,7 +112,8 @@ const toggleAutoScroll = () => {
   nextTick(scrollToBottom);
 };
 
-onMounted(() => {
+onMounted(async () => {
+  apiPort.value = await resolveInitialBackendPort();
   connect();
   portWatcher = window.setInterval(syncPort, 1000);
   window.addEventListener('storage', syncPort);

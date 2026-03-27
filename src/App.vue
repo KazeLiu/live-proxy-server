@@ -20,10 +20,11 @@
 <script setup>
 import { RouterLink, RouterView } from 'vue-router';
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { getApiOrigin, getDefaultPort, resolveInitialBackendPort } from './utils/apiConfig.js';
 
-const DEFAULT_PORT = 8900;
-const apiPort = ref(Number(localStorage.getItem('backend_port')) || DEFAULT_PORT);
-const apiOrigin = computed(() => `http://127.0.0.1:${apiPort.value}`);
+const DEFAULT_PORT = getDefaultPort();
+const apiPort = ref(DEFAULT_PORT);
+const apiOrigin = computed(() => getApiOrigin(apiPort.value));
 const backendAlive = ref(false);
 const statusClass = computed(() => (backendAlive.value ? 'is-online' : 'is-offline'));
 
@@ -51,7 +52,10 @@ const stopPolling = () => {
   }
 };
 
-onMounted(startPolling);
+onMounted(async () => {
+  apiPort.value = await resolveInitialBackendPort();
+  startPolling();
+});
 onBeforeUnmount(stopPolling);
 </script>
 

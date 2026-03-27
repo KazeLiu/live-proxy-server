@@ -68,10 +68,11 @@
 
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue';
+import { getApiOrigin, getDefaultPort, resolveInitialBackendPort } from '../utils/apiConfig.js';
 
-const DEFAULT_PORT = 8900;
-const apiPort = ref(Number(localStorage.getItem('backend_port')) || DEFAULT_PORT);
-const apiOrigin = computed(() => `http://127.0.0.1:${apiPort.value}`);
+const DEFAULT_PORT = getDefaultPort();
+const apiPort = ref(DEFAULT_PORT);
+const apiOrigin = computed(() => getApiOrigin(apiPort.value));
 const subscriptionUrl = computed(() => `${apiOrigin.value}/subscription.m3u`);
 
 const inputUrl = ref('');
@@ -271,7 +272,10 @@ watch(
   { deep: true }
 );
 
-onMounted(loadSubscription);
+onMounted(async () => {
+  apiPort.value = await resolveInitialBackendPort();
+  await loadSubscription();
+});
 </script>
 
 <style scoped>

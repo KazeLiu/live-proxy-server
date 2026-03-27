@@ -61,10 +61,19 @@
 </template>
 <script setup>
 import { onMounted, reactive, ref, computed } from 'vue';
+import {
+  createInitialConfig,
+  getApiOrigin,
+  getDefaultPort,
+  resolveInitialBackendPort,
+  setStoredBackendPort,
+  updateCachedAppConfig
+} from '../utils/apiConfig.js';
 
-const DEFAULT_PORT = 8900;
-const apiPort = ref(Number(localStorage.getItem('backend_port')) || DEFAULT_PORT);
-const apiOrigin = computed(() => `http://127.0.0.1:${apiPort.value}`);
+const DEFAULT_PORT = getDefaultPort();
+const REQUEST_TIMEOUT_MS = 2500;
+const apiPort = ref(DEFAULT_PORT);
+const apiOrigin = computed(() => getApiOrigin(apiPort.value));
 
 const form = reactive({
   STREAMLINK_CMD: '',
@@ -72,12 +81,12 @@ const form = reactive({
   port: DEFAULT_PORT
 });
 
-const statusText = ref('正在连接...');
+const statusText = ref('正在初始化...');
 const statusClass = computed(() => {
   if (statusText.value.includes('成功')) {
     return 'success';
   }
-  if (statusText.value.includes('失败')) {
+  if (statusText.value.includes('失败') || statusText.value.includes('超时')) {
     return 'error';
   }
   return 'pending';
@@ -86,11 +95,30 @@ const isSaving = ref(false);
 
 const setApiPort = (nextPort) => {
   apiPort.value = nextPort;
-  localStorage.setItem('backend_port', String(nextPort));
+  setStoredBackendPort(nextPort);
 };
 
-const fetchConfig = async (origin) => {
-  const resp = await fetch(`${origin}/config`);
+const fetchWithTimeout = async (url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) => {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('请求超时');
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+};
+
+const fetchConfig = async (origin, timeoutMs = REQUEST_TIMEOUT_MS) => {
+  const resp = await fetchWithTimeout(`${origin}/config`, { cache: 'no-store' }, timeoutMs);
   if (!resp.ok) {
     throw new Error('加载失败');
   }
@@ -99,33 +127,35 @@ const fetchConfig = async (origin) => {
 };
 
 const applyConfig = (data) => {
-  form.STREAMLINK_CMD = data.STREAMLINK_CMD || '';
-  form.httpProxy = data.httpProxy || '';
-  form.port = data.port || DEFAULT_PORT;
+  const normalized = updateCachedAppConfig(data);
+  form.STREAMLINK_CMD = normalized.STREAMLINK_CMD;
+  form.httpProxy = normalized.httpProxy;
+  form.port = normalized.port;
 };
 
 const loadConfig = async () => {
-  try {
-    const { data } = await fetchConfig(apiOrigin.value);
-    applyConfig(data);
-    statusText.value = '配置加载成功';
-    return;
-  } catch (error) {
-    if (apiPort.value !== DEFAULT_PORT) {
-      try {
-        const fallbackOrigin = `http://127.0.0.1:${DEFAULT_PORT}`;
-        const { data } = await fetchConfig(fallbackOrigin);
-        setApiPort(DEFAULT_PORT);
-        applyConfig(data);
-        statusText.value = '配置加载成功';
-        return;
-      } catch (fallbackError) {
-        console.error(fallbackError);
-      }
-    }
-    statusText.value = '连接失败，请确认后端已启动';
-    console.error(error);
+  const originsToTry = [apiOrigin.value];
+  const fallbackOrigin = `http://127.0.0.1:${DEFAULT_PORT}`;
+  if (apiOrigin.value !== fallbackOrigin) {
+    originsToTry.push(fallbackOrigin);
   }
+
+  for (const origin of originsToTry) {
+    try {
+      const { data } = await fetchConfig(origin);
+      if (origin !== apiOrigin.value) {
+        setApiPort(DEFAULT_PORT);
+      }
+      applyConfig(data);
+      statusText.value = '配置加载成功';
+      return true;
+    } catch (error) {
+      console.error(`加载配置失败: ${origin}`, error);
+    }
+  }
+
+  statusText.value = '连接失败，请确认后端已启动';
+  return false;
 };
 
 const pollBackend = async (origin, timeoutMs = 10000, intervalMs = 500) => {
@@ -133,7 +163,7 @@ const pollBackend = async (origin, timeoutMs = 10000, intervalMs = 500) => {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
-      const resp = await fetch(`${origin}/config`, { cache: 'no-store' });
+      const resp = await fetchWithTimeout(`${origin}/config`, { cache: 'no-store' }, Math.min(intervalMs, 1500));
       if (resp.ok) {
         return true;
       }
@@ -151,18 +181,18 @@ const pollBackend = async (origin, timeoutMs = 10000, intervalMs = 500) => {
 
 const replaceSubscriptionPort = async (origin) => {
   try {
-    const resp = await fetch(`${origin}/subscription.m3u`, { cache: 'no-store' });
+    const resp = await fetchWithTimeout(`${origin}/subscription.m3u`, { cache: 'no-store' });
     if (!resp.ok) return;
     const text = await resp.text();
     const updated = text
       .replace(/http:\/\/127\.0\.0\.1:\d+/g, origin)
       .replace(/http:\/\/localhost:\d+/g, origin);
     if (updated === text) return;
-    await fetch(`${origin}/subscription`, {
+    await fetchWithTimeout(`${origin}/subscription`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: updated })
-    });
+    }, 4000);
   } catch (error) {
     console.error('同步订阅端口失败', error);
   }
@@ -171,7 +201,7 @@ const replaceSubscriptionPort = async (origin) => {
 const saveConfig = async () => {
   isSaving.value = true;
   try {
-    const resp = await fetch(`${apiOrigin.value}/config`, {
+    const resp = await fetchWithTimeout(`${apiOrigin.value}/config`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
@@ -181,12 +211,12 @@ const saveConfig = async () => {
         httpProxy: form.httpProxy,
         port: form.port
       })
-    });
+    }, 4000);
     if (!resp.ok) {
       throw new Error('保存失败');
     }
 
-    const restartResp = await fetch(`${apiOrigin.value}/restart`, { method: 'POST' });
+    const restartResp = await fetchWithTimeout(`${apiOrigin.value}/restart`, { method: 'POST' }, 4000);
     if (!restartResp.ok) {
       throw new Error('重启请求失败');
     }
@@ -198,7 +228,8 @@ const saveConfig = async () => {
     const ok = await pollBackend(nextOrigin, 12000, 600);
     if (ok) {
       await replaceSubscriptionPort(nextOrigin);
-      await loadConfig();
+      window.location.reload();
+      return;
     } else {
       statusText.value = '重启超时，请确认后端已重新启动';
     }
@@ -224,7 +255,24 @@ const pickStreamlink = () => {
   input.click();
 };
 
-onMounted(loadConfig);
+onMounted(async () => {
+  try {
+    const initialConfig = await createInitialConfig();
+    Object.assign(form, initialConfig);
+    statusText.value = '正在连接后端...';
+  } catch (error) {
+    console.error('加载本地配置失败:', error);
+    statusText.value = '本地配置加载失败，已使用默认值';
+  }
+
+  try {
+    setApiPort(await resolveInitialBackendPort());
+    await loadConfig();
+  } catch (error) {
+    console.error('初始化配置失败:', error);
+    statusText.value = '页面初始化失败';
+  }
+});
 </script>
 
 <style scoped>
