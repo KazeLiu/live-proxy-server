@@ -42,7 +42,7 @@
             class="styled-input"
             type="number"
             v-model.number="form.port"
-            placeholder="8899"
+            placeholder="8900"
           />
         </div>
 
@@ -62,7 +62,7 @@
 <script setup>
 import { onMounted, reactive, ref, computed } from 'vue';
 
-const DEFAULT_PORT = 8899;
+const DEFAULT_PORT = 8900;
 const apiPort = ref(Number(localStorage.getItem('backend_port')) || DEFAULT_PORT);
 const apiOrigin = computed(() => `http://127.0.0.1:${apiPort.value}`);
 

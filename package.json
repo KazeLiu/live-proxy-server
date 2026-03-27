@@ -2,14 +2,17 @@
   "name": "live-proxy-server",
   "version": "1.0.0",
   "description": "",
-  "main": "server/index.mjs",
+  "main": "electron/main.cjs",
   "scripts": {
-    "start": "node server/index.mjs",
+    "start": "electron .",
+    "start:server": "node server/index.mjs",
     "dev": "node server/index.mjs",
     "dev:ui": "vite",
     "dev:all": "concurrently -k \"node server/index.mjs\" \"vite\"",
-    "build": "vite build",
+    "build:web": "vite build",
+    "build": "npm run build:web && electron-builder --win nsis",
     "preview": "vite preview",
+    "pack": "npm run build:web && electron-builder --dir",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -25,6 +28,46 @@
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.5",
     "concurrently": "^9.2.1",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
     "vite": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.liveproxy.server",
+    "productName": "LiveProxyServer",
+    "directories": {
+      "output": "release"
+    },
+    "asarUnpack": [
+      "server/**",
+      "dist/**",
+      "config.json",
+      "server/config.json"
+    ],
+    "files": [
+      "dist/**/*",
+      "server/**/*",
+      "electron/**/*",
+      "config.json",
+      "server/config.json",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "public/icon.png",
+        "to": "icon.png"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "public/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    }
   }
 }

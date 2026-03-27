@@ -64,7 +64,7 @@ const OUTPUT_DIR = path.join(__dirname, 'output');
 const SUBSCRIPTION_FILE = path.join(OUTPUT_DIR, 'live.m3u');
 
 const DEFAULT_CONFIG = {
-  port: 8899,
+  port:8900,
   STREAMLINK_CMD: 'C:\\Program Files\\Streamlink\\bin\\streamlink.exe',
   httpProxy: 'http://127.0.0.1:7897'
 };
