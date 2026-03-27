@@ -67,6 +67,40 @@
 
         <div class="divider"></div>
 
+        <div class="form-group">
+          <label class="label">m3u 导入导出</label>
+          <div class="action-footer">
+            <button class="btn-secondary" type="button" @click="exportM3uFile">导出当前 m3u 文件</button>
+            <div class="import-card">
+              <div class="input-row">
+                <input
+                  class="styled-input"
+                  type="text"
+                  :value="importFileName"
+                  placeholder="请选择 .m3u 文件"
+                  readonly
+                />
+                <button class="btn-icon" type="button" @click="pickImportFile" title="选择 m3u 文件">
+                  <span class="icon">📂</span>
+                </button>
+              </div>
+              <input
+                class="styled-input"
+                type="number"
+                v-model.number="importPort"
+                placeholder="导入时同时修改端口"
+              />
+              <button class="btn-secondary" type="button" :disabled="isImporting" @click="importM3uFile">
+                <span v-if="isImporting" class="loader loader-dark"></span>
+                {{ isImporting ? '导入中...' : '导入 m3u 并应用端口' }}
+              </button>
+              <p class="hint">导入后会覆盖当前订阅内容，并同步更新服务端口。</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
         <div class="action-footer">
           <button class="btn-primary" :disabled="isSaving" @click="saveConfig">
             <span v-if="isSaving" class="loader"></span>
@@ -112,6 +146,10 @@ const statusClass = computed(() => {
   return 'pending';
 });
 const isSaving = ref(false);
+const isImporting = ref(false);
+const importFile = ref(null);
+const importFileName = ref('');
+const importPort = ref(DEFAULT_PORT);
 
 const setApiPort = (nextPort) => {
   apiPort.value = nextPort;
@@ -219,6 +257,27 @@ const replaceSubscriptionPort = async (origin) => {
   }
 };
 
+const triggerRestart = async (targetOrigin, nextPort, successMessage = '保存成功，后端重启中...') => {
+  const restartResp = await fetchWithTimeout(`${targetOrigin}/restart`, { method: 'POST' }, 4000);
+  if (!restartResp.ok) {
+    throw new Error('重启请求失败');
+  }
+
+  statusText.value = successMessage;
+  setApiPort(nextPort);
+
+  const nextOrigin = `http://127.0.0.1:${nextPort}`;
+  const ok = await pollBackend(nextOrigin, 12000, 600);
+  if (ok) {
+    await replaceSubscriptionPort(nextOrigin);
+    window.location.reload();
+    return true;
+  }
+
+  statusText.value = '重启超时，请确认后端已重新启动';
+  return false;
+};
+
 const saveConfig = async () => {
   isSaving.value = true;
   try {
@@ -238,28 +297,72 @@ const saveConfig = async () => {
       throw new Error('保存失败');
     }
 
-    const restartResp = await fetchWithTimeout(`${apiOrigin.value}/restart`, { method: 'POST' }, 4000);
-    if (!restartResp.ok) {
-      throw new Error('重启请求失败');
-    }
-
-    statusText.value = '保存成功，后端重启中...';
-    setApiPort(form.port);
-
-    const nextOrigin = `http://127.0.0.1:${form.port}`;
-    const ok = await pollBackend(nextOrigin, 12000, 600);
-    if (ok) {
-      await replaceSubscriptionPort(nextOrigin);
-      window.location.reload();
-      return;
-    } else {
-      statusText.value = '重启超时，请确认后端已重新启动';
-    }
+    await triggerRestart(apiOrigin.value, form.port, '保存成功，后端重启中...');
   } catch (error) {
     statusText.value = error?.message || '保存失败';
     console.error(error);
   } finally {
     isSaving.value = false;
+  }
+};
+
+const exportM3uFile = () => {
+  window.open(`${apiOrigin.value}/subscription/export`, '_blank', 'noopener');
+};
+
+const pickImportFile = () => {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.m3u,.m3u8,audio/x-mpegurl';
+  input.onchange = (event) => {
+    const file = event.target.files && event.target.files[0];
+    if (file) {
+      importFile.value = file;
+      importFileName.value = file.name;
+      statusText.value = '已选择 m3u 文件，请点击导入';
+    }
+  };
+  input.click();
+};
+
+const importM3uFile = async () => {
+  if (!importFile.value) {
+    statusText.value = '请先选择要导入的 m3u 文件';
+    return;
+  }
+
+  const nextPort = Number(importPort.value);
+  if (!Number.isFinite(nextPort) || nextPort <= 0) {
+    statusText.value = '请输入有效的导入端口';
+    return;
+  }
+
+  isImporting.value = true;
+  try {
+    const content = await importFile.value.text();
+    const resp = await fetchWithTimeout(`${apiOrigin.value}/subscription/import`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        content,
+        port: nextPort
+      })
+    }, 6000);
+
+    if (!resp.ok) {
+      throw new Error('导入失败');
+    }
+
+    form.port = nextPort;
+    updateCachedAppConfig({ port: nextPort });
+    await triggerRestart(apiOrigin.value, nextPort, '导入成功，后端重启中...');
+  } catch (error) {
+    statusText.value = error?.message || '导入失败';
+    console.error(error);
+  } finally {
+    isImporting.value = false;
   }
 };
 
@@ -281,6 +384,7 @@ onMounted(async () => {
   try {
     const initialConfig = await createInitialConfig();
     Object.assign(form, initialConfig);
+    importPort.value = initialConfig.port;
     statusText.value = '正在连接后端...';
   } catch (error) {
     console.error('加载本地配置失败:', error);
@@ -393,6 +497,16 @@ onMounted(async () => {
   box-shadow: 0 0 0 4px rgba(77, 171, 247, 0.1);
 }
 
+.import-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px dashed #dbe4ff;
+  border-radius: 16px;
+  background: #f8fbff;
+}
+
 .input-row {
   display: flex;
   gap: 10px;
@@ -481,13 +595,44 @@ onMounted(async () => {
   gap: 8px;
 }
 
+.btn-secondary {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #cfe0ff;
+  border-radius: 14px;
+  background: #eef5ff;
+  color: #1c5fd4;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+}
+
 .btn-primary:hover {
   background: #1a6ab3;
   transform: translateY(-1px);
 }
 
+.btn-secondary:hover {
+  background: #dbe9ff;
+  transform: translateY(-1px);
+}
+
 .btn-primary:active {
   transform: translateY(0);
+}
+
+.btn-secondary:active {
+  transform: translateY(0);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .btn-icon {
@@ -525,6 +670,11 @@ onMounted(async () => {
   border-radius: 50%;
   display: inline-block;
   animation: rotation 1s linear infinite;
+}
+
+.loader-dark {
+  border-color: #1c5fd4;
+  border-bottom-color: transparent;
 }
 
 @keyframes rotation {

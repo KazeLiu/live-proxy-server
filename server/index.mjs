@@ -126,6 +126,11 @@ const writeSubscription = async (content) => {
   return payload;
 };
 
+const buildSubscriptionDownloadName = () => {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return `live-${timestamp}.m3u`;
+};
+
 const config = await loadConfig();
 
 const app = express();
@@ -176,6 +181,19 @@ app.get('/subscription.m3u', async (_req, res) => {
   }
 });
 
+app.get('/subscription/export', async (_req, res) => {
+  try {
+    const content = await readSubscription();
+    res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${buildSubscriptionDownloadName()}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(content);
+  } catch (error) {
+    console.error('Failed to export subscription:', error);
+    res.status(500).json({ error: 'failed to export subscription' });
+  }
+});
+
 app.post('/subscription', async (req, res) => {
   try {
     const content = String(req.body?.content || '');
@@ -184,6 +202,33 @@ app.post('/subscription', async (req, res) => {
   } catch (error) {
     console.error('Failed to save subscription:', error);
     res.status(500).json({ error: 'failed to save subscription' });
+  }
+});
+
+app.post('/subscription/import', async (req, res) => {
+  try {
+    const content = String(req.body?.content || '');
+    const nextPort = req.body?.port;
+    const payload = await writeSubscription(content);
+
+    let savedConfig = null;
+    if (nextPort !== undefined && nextPort !== null && String(nextPort).trim() !== '') {
+      const currentConfig = await loadConfig();
+      savedConfig = await saveConfig({
+        ...currentConfig,
+        port: nextPort
+      });
+    }
+
+    res.json({
+      ok: true,
+      length: payload.length,
+      port: savedConfig?.port ?? null,
+      requiresRestart: savedConfig !== null
+    });
+  } catch (error) {
+    console.error('Failed to import subscription:', error);
+    res.status(500).json({ error: 'failed to import subscription' });
   }
 });
 

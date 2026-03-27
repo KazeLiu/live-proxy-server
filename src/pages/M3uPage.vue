@@ -8,10 +8,10 @@
 
       <div class="form-row">
         <input
-            class="input"
-            v-model.trim="inputUrl"
-            placeholder="输入完整的直播地址"
-            @keyup.enter="resolveInfo"
+          class="input"
+          v-model.trim="inputUrl"
+          placeholder="输入完整的直播地址"
+          @keyup.enter="resolveInfo"
         />
         <button class="btn" :disabled="isResolving" @click="resolveInfo">
           {{ isResolving ? '识别中...' : '确认' }}
@@ -20,7 +20,7 @@
 
       <div class="result" v-if="preview">
         <div class="meta">
-          <img class="cover" :src="preview.cover" alt="cover"/>
+          <img class="cover" :src="preview.cover" alt="cover" />
           <h3>{{ preview.title }}</h3>
           <p>{{ preview.author || '未知主播' }}</p>
           <button class="btn-outline" @click="addToList">加入 m3u</button>
@@ -38,6 +38,7 @@
         <h2>已添加</h2>
         <p>将这些直播输出为 m3u 文件。</p>
       </div>
+
       <div class="subscription-box">
         <div class="subscription-label">订阅地址</div>
         <div class="subscription-row">
@@ -46,45 +47,133 @@
         </div>
         <div class="subscription-hint">支持播放器直接订阅，列表变更会自动更新。</div>
       </div>
-      <button class="btn" :disabled="!items.length" @click="exportM3u">导出 m3u</button>
-      <div v-if="items.length" class="list">
-        <div class="list-item" v-for="item in items" :key="item.id">
-          <img class="thumb" :src="item.cover" alt="cover"/>
-          <div class="detail">
-            <div class="name">{{ item.title }}</div>
-            <div class="sub">{{ item.author || '未知主播' }} · {{ item.platformLabel }}</div>
-          </div>
-          <button class="btn-text" @click="removeItem(item.id)">移除</button>
-        </div>
-      </div>
-      <div v-else class="empty">还没有添加任何直播</div>
 
-      <div class="export">
-        <textarea class="textarea" readonly :value="m3uContent"></textarea>
+      <div class="view-toolbar">
+        <div class="view-switch">
+          <button
+            class="view-switch-btn"
+            :class="{ active: activeView === 'info' }"
+            @click="activeView = 'info'"
+          >
+            直播信息视图
+          </button>
+          <button
+            class="view-switch-btn"
+            :class="{ active: activeView === 'm3u' }"
+            @click="activeView = 'm3u'"
+          >
+            m3u 内容视图
+          </button>
+        </div>
+        <button class="btn" :disabled="!items.length || isBatchRefreshing" @click="refreshAllItems">
+          {{ isBatchRefreshing ? '批量刷新中...' : '批量刷新直播信息' }}
+        </button>
       </div>
+
+      <div class="auto-refresh-hint">已启用定时刷新：每 3 小时自动重新解析一次直播信息。</div>
+
+      <template v-if="activeView === 'info'">
+        <div v-if="items.length" class="list">
+          <div class="list-item" v-for="item in items" :key="item.id">
+            <img class="thumb" :src="item.cover" alt="cover" />
+            <div class="detail">
+              <div class="name-row">
+                <div class="name">{{ item.title }}</div>
+                <span v-if="item.isRefreshing" class="status-tag">刷新中</span>
+              </div>
+              <div class="sub">{{ item.author || '未知主播' }} · {{ item.platformLabel }}</div>
+              <div class="sub" v-if="item.lastRefreshedAt">上次刷新：{{ formatRefreshTime(item.lastRefreshedAt) }}</div>
+            </div>
+            <div class="item-actions">
+              <button class="btn-text btn-text-primary" @click="refreshItem(item)" :disabled="item.isRefreshing">
+                {{ item.isRefreshing ? '刷新中...' : '刷新' }}
+              </button>
+              <button class="btn-text" @click="removeItem(item.id)">移除</button>
+            </div>
+          </div>
+        </div>
+        <div v-else class="empty">还没有添加任何直播</div>
+      </template>
+
+      <template v-else>
+        <div class="export export-full">
+          <textarea class="textarea" readonly :value="m3uContent"></textarea>
+        </div>
+      </template>
     </section>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { getApiOrigin, getDefaultPort, resolveInitialBackendPort } from '../utils/apiConfig.js';
 
 const DEFAULT_PORT = getDefaultPort();
+const AUTO_REFRESH_INTERVAL = 3 * 60 * 60 * 1000;
+
 const apiPort = ref(DEFAULT_PORT);
 const apiOrigin = computed(() => getApiOrigin(apiPort.value));
 const subscriptionUrl = computed(() => `${apiOrigin.value}/subscription.m3u`);
 
 const inputUrl = ref('');
 const isResolving = ref(false);
+const isBatchRefreshing = ref(false);
 const errorText = ref('');
 const preview = ref(null);
 const items = ref([]);
+const activeView = ref('info');
 let isHydrating = true;
+let autoRefreshTimer = null;
 
 const platformLabels = {
   youtube: 'YouTube',
   bilibili: 'Bilibili'
+};
+
+const buildSourceUrlByPlatform = (platform, id) => {
+  if (!platform || !id) {
+    return '';
+  }
+
+  if (platform === 'youtube') {
+    return `https://www.youtube.com/live/${id}`;
+  }
+
+  if (platform === 'bilibili') {
+    return `https://live.bilibili.com/${id}`;
+  }
+
+  return '';
+};
+
+const buildItemFromLiveInfo = (data, fallbackItem = {}) => {
+  const coverUrl = data.cover || fallbackItem.rawCover || '';
+  const isBilibili = data.platform === 'bilibili' && coverUrl;
+  const sourceUrl = data.sourceUrl || fallbackItem.sourceUrl || buildSourceUrlByPlatform(data.platform, data.id);
+
+  return {
+    id: `${data.platform}-${data.id}`,
+    title: data.title || fallbackItem.title || '未知标题',
+    author: data.author || fallbackItem.author || '',
+    cover: isBilibili
+      ? `${apiOrigin.value}/image?url=${encodeURIComponent(coverUrl)}`
+      : coverUrl,
+    rawCover: coverUrl,
+    platform: data.platform,
+    platformLabel: platformLabels[data.platform] || data.platform,
+    streamUrl: `${apiOrigin.value}/live/${data.platform}/${data.id}`,
+    sourceUrl,
+    isRefreshing: false,
+    lastRefreshedAt: new Date().toISOString()
+  };
+};
+
+const fetchLiveInfo = async (url) => {
+  const resp = await fetch(`${apiOrigin.value}/live-info?url=${encodeURIComponent(url)}`);
+  if (!resp.ok) {
+    throw new Error('解析失败');
+  }
+  return resp.json();
 };
 
 const resolveInfo = async () => {
@@ -96,25 +185,8 @@ const resolveInfo = async () => {
   errorText.value = '';
   preview.value = null;
   try {
-    const resp = await fetch(`${apiOrigin.value}/live-info?url=${encodeURIComponent(inputUrl.value)}`);
-    if (!resp.ok) {
-      throw new Error('解析失败');
-    }
-    const data = await resp.json();
-    const coverUrl = data.cover || '';
-    const isBilibili = data.platform === 'bilibili' && coverUrl;
-    preview.value = {
-      id: `${data.platform}-${data.id}`,
-      title: data.title || '未知标题',
-      author: data.author || '',
-      cover: isBilibili
-          ? `${apiOrigin.value}/image?url=${encodeURIComponent(coverUrl)}`
-          : coverUrl,
-      platform: data.platform,
-      platformLabel: platformLabels[data.platform] || data.platform,
-      streamUrl: `${apiOrigin.value}/live/${data.platform}/${data.id}`,
-      sourceUrl: data.sourceUrl
-    };
+    const data = await fetchLiveInfo(inputUrl.value);
+    preview.value = buildItemFromLiveInfo(data);
   } catch (error) {
     errorText.value = '解析失败，请确认链接可用';
   } finally {
@@ -128,13 +200,61 @@ const addToList = () => {
     errorText.value = '该直播已在列表中';
     return;
   }
-  items.value.push({...preview.value});
+  items.value.push({ ...preview.value });
   preview.value = null;
   inputUrl.value = '';
+  activeView.value = 'info';
 };
 
 const removeItem = (id) => {
   items.value = items.value.filter((item) => item.id !== id);
+};
+
+const refreshItem = async (item) => {
+  if (!item || item.isRefreshing) {
+    return;
+  }
+
+  const sourceUrl = buildSourceUrlByPlatform(item.platform, item.id?.split('-').slice(1).join('-') || '');
+  if (!sourceUrl) {
+    return;
+  }
+
+  item.isRefreshing = true;
+  try {
+    const data = await fetchLiveInfo(sourceUrl);
+    const nextItem = buildItemFromLiveInfo(data, item);
+    Object.assign(item, nextItem);
+  } catch (error) {
+    console.error('刷新直播信息失败', error);
+  } finally {
+    item.isRefreshing = false;
+  }
+};
+
+const refreshAllItems = async () => {
+  // 批量刷新时沿用单条刷新逻辑，确保导入条目与手动添加条目行为一致。
+  if (!items.value.length || isBatchRefreshing.value) {
+    return;
+  }
+
+  isBatchRefreshing.value = true;
+  try {
+    for (const item of items.value) {
+      await refreshItem(item);
+    }
+  } finally {
+    isBatchRefreshing.value = false;
+  }
+};
+
+const formatRefreshTime = (time) => {
+  if (!time) return '未知';
+  const date = new Date(time);
+  if (Number.isNaN(date.getTime())) {
+    return '未知';
+  }
+  return date.toLocaleString('zh-CN', { hour12: false });
 };
 
 const parseAttributes = (text) => {
@@ -189,10 +309,13 @@ const parseM3u = (content) => {
       title: displayName || attrs['tvg-name'] || platformLabel,
       author: attrs['tvg-name'] || '',
       cover: attrs['tvg-logo'] || '',
+      rawCover: attrs['tvg-logo'] || '',
       platform,
       platformLabel,
       streamUrl,
-      sourceUrl: ''
+      sourceUrl: buildSourceUrlByPlatform(platform, id),
+      isRefreshing: false,
+      lastRefreshedAt: ''
     });
     pendingMeta = '';
   }
@@ -253,16 +376,6 @@ const copySubscription = async () => {
   }
 };
 
-const exportM3u = () => {
-  const blob = new Blob([m3uContent.value], {type: 'audio/x-mpegurl'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `live-${Date.now()}.m3u`;
-  a.click();
-  URL.revokeObjectURL(url);
-};
-
 watch(
   items,
   () => {
@@ -275,6 +388,16 @@ watch(
 onMounted(async () => {
   apiPort.value = await resolveInitialBackendPort();
   await loadSubscription();
+  autoRefreshTimer = window.setInterval(() => {
+    refreshAllItems();
+  }, AUTO_REFRESH_INTERVAL);
+});
+
+onBeforeUnmount(() => {
+  if (autoRefreshTimer) {
+    window.clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
 });
 </script>
 
@@ -346,30 +469,29 @@ onMounted(async () => {
   cursor: pointer;
 }
 
-  .result {
-    margin-top: 20px;
-    display: block;
-    padding: 16px;
-    border-radius: 16px;
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
-  }
+.result {
+  margin-top: 20px;
+  display: block;
+  padding: 16px;
+  border-radius: 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
 
-  .preview-actions {
-    margin-top: 12px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
+.preview-actions {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 
-  .cover {
-    width: 100%;
-    object-fit: cover;
-    border-radius: 12px;
-    background: #e2e8f0;
-  }
-
+.cover {
+  width: 100%;
+  object-fit: cover;
+  border-radius: 12px;
+  background: #e2e8f0;
+}
 
 .meta h3 {
   margin: 0 0 6px;
@@ -429,10 +551,48 @@ onMounted(async () => {
   color: #94a3b8;
 }
 
+.view-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.view-switch {
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px;
+  border-radius: 14px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+}
+
+.view-switch-btn {
+  border: none;
+  background: transparent;
+  color: #1e40af;
+  padding: 10px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.view-switch-btn.active {
+  background: #2563eb;
+  color: #ffffff;
+}
+
+.auto-refresh-hint {
+  font-size: 12px;
+  color: #64748b;
+}
+
 .list {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  max-height: 320px;
+  overflow: auto;
 }
 
 .list-item {
@@ -454,6 +614,14 @@ onMounted(async () => {
 
 .detail {
   flex: 1;
+  min-width: 0;
+}
+
+.name-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 .name {
@@ -466,6 +634,22 @@ onMounted(async () => {
   color: #64748b;
 }
 
+.status-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #1d4ed8;
+  background: #dbeafe;
+}
+
+.item-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .btn-text {
   background: none;
   border: none;
@@ -474,52 +658,76 @@ onMounted(async () => {
   font-size: 13px;
 }
 
+.btn-text:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-text-primary {
+  color: #2563eb;
+}
+
 .empty {
   font-size: 13px;
   color: #94a3b8;
 }
 
-  .export {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 12px;
-    align-items: start;
-    margin-top: 8px;
-  }
+.export {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: start;
+  margin-top: 8px;
+}
 
-  .export .btn {
-    align-self: start;
-  }
+.export-full {
+  grid-template-columns: 1fr;
+  margin-top: 0;
+}
 
-  .textarea {
-    width: 100%;
-    min-height: 160px;
-    border-radius: 12px;
-    border: 1px solid #e2e8f0;
-    padding: 12px;
-    font-size: 12px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    background: #f8fafc;
-  }
+.export .btn {
+  align-self: start;
+}
 
-  .list {
-    max-height: 320px;
-    overflow: auto;
-  }
-
+.textarea {
+  width: 100%;
+  min-height: 320px;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  padding: 12px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  background: #f8fafc;
+}
 
 @media (max-width: 600px) {
   .form-row {
     flex-direction: column;
   }
 
-  .subscription-row {
+  .subscription-row,
+  .view-toolbar,
+  .item-actions {
     flex-direction: column;
+    align-items: stretch;
   }
 
   .result {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .list-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .view-switch {
+    width: 100%;
+  }
+
+  .view-switch-btn {
+    flex: 1;
   }
 }
 </style>
